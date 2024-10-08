@@ -24,9 +24,24 @@ class Sentence_Embedding(nn.module):
         self.START_TOKEN = START_TOKEN
         self.END_TOKEN = END_TOKEN
         self.PADDING_TOKEN = PADDING_TOKEN
-        
+    
     def batch_tokenize(self, batch, start_token, end_token):
-        return
+
+        def tokenize(sentence, start_token, end_token):
+            sentence_word_indicies = [self.language_to_index[token] for token in list(sentence)]
+            if start_token:
+                sentence_word_indicies.insert(0, self.language_to_index[self.START_TOKEN])
+            if end_token:
+                sentence_word_indicies.append(self.language_to_index[self.END_TOKEN])
+            for _ in range(len(sentence_word_indicies), self.max_sequence_length):
+                sentence_word_indicies.append(self.language_to_index[self.PADDING_TOKEN])
+            return torch.tensor(sentence_word_indicies)
+
+        tokenized = []
+        for sentence_num in range(len(batch)):
+           tokenized.append( tokenize(batch[sentence_num], start_token, end_token) )
+        tokenized = torch.stack(tokenized)
+        return tokenized.to(get_device())
     
     def forward(self, batch, start_token, end_token):
         idx = self.batch_tokenize(batch, start_token, end_token)
@@ -75,7 +90,7 @@ class Decoder(nn.module):
         PADDING_TOKEN):
         super().__init__()
         self.sentence_embedding = Sentence_Embedding(max_seq_length, model_embd, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.block = Sequential_Decoder(*[DecodeLayer(model_embd, ffn_hidden, num_heads, drop_prob) for _ in range(num_layers)])
+        self.block = Sequential_Decoder(*[DecoderLayer(model_embd, ffn_hidden, num_heads, drop_prob) for _ in range(num_layers)])
         
     def forward(self, x, idy, self_attention_mask, cross_attention_mask, start_token, end_token):
         y = self.sentence_embedding(idy, start_token, end_token)
@@ -97,14 +112,16 @@ class Transformer(nn.module):
             max_iters,
             eval_iters,
             learning_rate,
+            english_to_index,
+            portugese_to_index,
             START_TOKEN, 
             END_TOKEN, 
             PADDING_TOKEN
             ):
         super().__init__()
         self.device = get_device()
-        self.encoder = Encoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.decoder = Decoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.encoder = Encoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, english_to_index, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.decoder = Decoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, portugese_to_index, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
         self.layerNorm = nn.LayerNorm(model_embd)
         self.linear = nn.linear(model_embd, vocab_size)
 
@@ -163,3 +180,34 @@ por_data = torch.tensor(por_encode(portugese_file), dtype=torch.long)
 n = int(0.9*len(por_data)) # first 90% will be train, rest val
 train_data_por = por_data[:n]
 val_data_por = por_data[n:]
+
+model_embd = 512
+ffn_hidden = 2048
+num_heads = 8
+drop_prob = 0.1
+num_layers = 1
+max_sequence_length = 200
+batch_size = 16
+context_size = 32
+max_iters = 5000
+eval_iters = 100
+learning_rate = 1e-3
+START_TOKEN = ''
+END_TOKEN = ''
+PADDING_TOKEN = ''
+
+transformer = Transformer(model_embd, 
+                          ffn_hidden,
+                          num_heads, 
+                          drop_prob, 
+                          num_layers, 
+                          max_sequence_length,
+                          por_vocab_size,
+                          max_iters,
+                          eval_iters,
+                          learning_rate,
+                          eng_encode,
+                          por_encode,
+                          START_TOKEN, 
+                          END_TOKEN, 
+                          PADDING_TOKEN)
