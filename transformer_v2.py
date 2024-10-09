@@ -53,6 +53,23 @@ class Sentence_Embedding(nn.module):
         x = self.dropout(tok_emb + pos_emb)
         return x
 
+class LayerNormalization(nn.module):
+    def __init__(self, parameters_shape, eps=1e-5):
+        self.parameters_shape = parameters_shape
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.ones(parameters_shape))
+        self.beta = nn.Parameter(torch.zeros(parameters_shape))
+
+    def forward(self, inputs):
+        # calculate the forward pass
+        dims = [-(i + 1) for i in range(len(self.parameters_shape))]
+        xmean = inputs.mean(dim=dims, keepdim=True) # batch mean
+        xvar = inputs.var(dim=dims, keepdim=True) # batch variance
+        xhat = (inputs - xmean) / torch.sqrt(xvar + self.eps) # normalize to unit variance
+        self.out = self.gamma * xhat + self.beta
+        return self.out
+
+
 class Sequential_Encoder(nn.Sequential):
     def forward(self, *inputs):
         x, self_attention_mask  = inputs
