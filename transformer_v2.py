@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import math
 from torch import nn
+from torch.nn import functional as F
 
 def get_device():
     return torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -53,6 +54,48 @@ class Sentence_Embedding(nn.module):
         x = self.dropout(tok_emb + pos_emb)
         return x
 
+class SingleHeadAttention(nn.Module):
+    def __init__(self, model_embd, head_dim):
+        super().__init__()
+        self.model_embd = model_embd
+        self.head_dim = head_dim
+        self.key = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.query = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.value = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(context_size, context_size)))
+        self.linear_layer = nn.Linear(model_embd, model_embd)
+    
+    def forward(self, x, mask=None):
+        B,T,C = x.shape
+        k = self.key(x)   # (B,T,C)
+        q = self.query(x) # (B,T,C)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        if mask is not None:
+            wei = wei + mask
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        # perform the weighted aggregation of the values
+        v = self.value(x) # (B,T,C)
+        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        return out
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, model_embd, num_heads, drop_prob):
+        super().__init__()
+        self.drop_prob = drop_prob
+        self.model_embd = model_embd
+        self.num_heads = num_heads
+        self.head_size = model_embd // num_heads
+        self.heads = nn.ModuleList([SingleHeadAttention(model_embd, self.head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(model_embd, model_embd)
+        self.dropout = nn.Dropout(drop_prob)
+
+    def forward(self, x, mask=None):
+        out = torch.cat([h(x,mask) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
+    
 class LayerNormalization(nn.module):
     def __init__(self, parameters_shape, eps=1e-5):
         super().__init__()
@@ -107,15 +150,15 @@ class EncoderLayer(nn.Module):
         residual_x = x.clone()
         x = self.norm1(x)
         x = self.attention(x, mask=self_attention_mask)
-        x = x + residual_x
         x = self.linear1(x)
         x = self.dropout1(x)
+        x = x + residual_x
         residual_x = x.clone()
         x = self.norm2(x)
         x = self.ffn(x)
-        x = x + residual_x
         x = self.linear2(x)
         x = self.dropout2(x)
+        x = x + residual_x
         return x
     
 class Encoder(nn.module):
@@ -172,23 +215,24 @@ class DecoderLayer(nn.Module):
         residual_y = y.clone()
         y = self.layer_norm1(y)
         y = self.self_attention(y, mask=self_attention_mask)
-        y = y + residual_y
         y = self.linear1(y)
         y = self.dropout1(y)
+        y = y + residual_y
 
         residual_y = y.clone()
         y = self.layer_norm2(y)
         y = self.encoder_decoder_attention(x, y, mask=cross_attention_mask)
-        y = y + residual_y
         y = self.linear2(y)
         y = self.dropout2(y)
+        y = y + residual_y
 
         residual_y = y.clone()
         y = self.layer_norm3(y)
         y = self.ffn(y)
-        y = y + residual_y
         y = self.linear3(y)
         y = self.dropout3(y)
+        y = y + residual_y
+        
         return y
      
 class Decoder(nn.module):
