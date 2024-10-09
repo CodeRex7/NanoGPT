@@ -55,6 +55,7 @@ class Sentence_Embedding(nn.module):
 
 class LayerNormalization(nn.module):
     def __init__(self, parameters_shape, eps=1e-5):
+        super().__init__()
         self.parameters_shape = parameters_shape
         self.eps = eps
         self.gamma = nn.Parameter(torch.ones(parameters_shape))
@@ -69,6 +70,19 @@ class LayerNormalization(nn.module):
         self.out = self.gamma * xhat + self.beta
         return self.out
 
+class PositionwiseFeedForward(nn.Module):
+    def __init__(self, model_embd, ffn_hidden, drop_prob):
+        super(PositionwiseFeedForward, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(model_embd, ffn_hidden),
+            nn.ReLU(),
+            nn.Linear(ffn_hidden, model_embd),
+            nn.Dropout(drop_prob),
+        )
+
+    def forward(self, x):
+        x = self.net(x)
+        return x
 
 class Sequential_Encoder(nn.Sequential):
     def forward(self, *inputs):
@@ -91,15 +105,17 @@ class EncoderLayer(nn.Module):
 
     def forward(self, x, self_attention_mask):
         residual_x = x.clone()
+        x = self.norm1(x)
         x = self.attention(x, mask=self_attention_mask)
-        x = self.dropout1(x)
-        x = self.norm1(x + residual_x)
+        x = x + residual_x
         x = self.linear1(x)
+        x = self.dropout1(x)
         residual_x = x.clone()
+        x = self.norm2(x)
         x = self.ffn(x)
-        x = self.dropout2(x)
-        x = self.norm2(x + residual_x)
+        x = x + residual_x
         x = self.linear2(x)
+        x = self.dropout2(x)
         return x
     
 class Encoder(nn.module):
@@ -154,22 +170,25 @@ class DecoderLayer(nn.Module):
 
     def forward(self, x, y, self_attention_mask, cross_attention_mask):
         residual_y = y.clone()
+        y = self.layer_norm1(y)
         y = self.self_attention(y, mask=self_attention_mask)
-        y = self.dropout1(y)
-        y = self.layer_norm1(y + residual_y)
+        y = y + residual_y
         y = self.linear1(y)
-
-        _residual_y = y.clone()
-        y = self.encoder_decoder_attention(x, y, mask=cross_attention_mask)
-        y = self.dropout2(y)
-        y = self.layer_norm2(y + residual_y)
-        y = self.linear2(y)
+        y = self.dropout1(y)
 
         residual_y = y.clone()
+        y = self.layer_norm2(y)
+        y = self.encoder_decoder_attention(x, y, mask=cross_attention_mask)
+        y = y + residual_y
+        y = self.linear2(y)
+        y = self.dropout2(y)
+
+        residual_y = y.clone()
+        y = self.layer_norm3(y)
         y = self.ffn(y)
-        y = self.dropout3(y)
-        y = self.layer_norm3(y + residual_y)
+        y = y + residual_y
         y = self.linear3(y)
+        y = self.dropout3(y)
         return y
      
 class Decoder(nn.module):
