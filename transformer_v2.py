@@ -12,6 +12,7 @@ class Sentence_Embedding(nn.module):
         max_seq_length,
         model_embd,
         context_size,
+        language_to_index,
         START_TOKEN, 
         END_TOKEN, 
         PADDING_TOKEN):
@@ -20,6 +21,7 @@ class Sentence_Embedding(nn.module):
         self.vocab_size = len()
         self.embedding = nn.Embedding(self.vocab_size, model_embd)
         self.position_encoder = nn.Embedding(context_size, model_embd)
+        self.language_to_index = language_to_index
         self.dropout = nn.Dropout(p=0.1)
         self.START_TOKEN = START_TOKEN
         self.END_TOKEN = END_TOKEN
@@ -51,6 +53,38 @@ class Sentence_Embedding(nn.module):
         x = self.dropout(tok_emb + pos_emb)
         return x
 
+class Sequential_Encoder(nn.Sequential):
+    def forward(self, *inputs):
+        x, self_attention_mask  = inputs
+        for module in self._modules.values():
+            x = module(x, self_attention_mask)
+        return x
+
+class EncoderLayer(nn.Module):
+    def __init__(self, model_embd, ffn_hidden, num_heads, drop_prob, vocab_size):
+        super(EncoderLayer, self).__init__()
+        self.attention = MultiHeadAttention(model_embd=model_embd, num_heads=num_heads)
+        self.norm1 = LayerNormalization(parameters_shape=[model_embd])
+        self.linear1 = nn.Linear(model_embd, vocab_size)
+        self.dropout1 = nn.Dropout(p=drop_prob)
+        self.ffn = PositionwiseFeedForward(model_embd=model_embd, hidden=ffn_hidden, drop_prob=drop_prob)
+        self.norm2 = LayerNormalization(parameters_shape=[model_embd])
+        self.linear2 = nn.Linear(model_embd, vocab_size)
+        self.dropout2 = nn.Dropout(p=drop_prob)
+
+    def forward(self, x, self_attention_mask):
+        residual_x = x.clone()
+        x = self.attention(x, mask=self_attention_mask)
+        x = self.dropout1(x)
+        x = self.norm1(x + residual_x)
+        x = self.linear1(x)
+        residual_x = x.clone()
+        x = self.ffn(x)
+        x = self.dropout2(x)
+        x = self.norm2(x + residual_x)
+        x = self.linear2(x)
+        return x
+    
 class Encoder(nn.module):
     def __init__(
         self,
@@ -61,19 +95,66 @@ class Encoder(nn.module):
         num_layers, 
         max_seq_length, 
         batch_size, 
-        context_size, 
+        context_size,
+        vocab_size,
+        english_to_index, 
         START_TOKEN, 
         END_TOKEN, 
         PADDING_TOKEN):
         super().__init__()
-        self.sentence_embedding = Sentence_Embedding(max_seq_length, model_embd, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.block = Sequential_Encoder(*[EncoderLayer(model_embd, ffn_hidden, num_heads, drop_prob) for _ in range(num_layers)])
+        self.sentence_embedding = Sentence_Embedding(max_seq_length, model_embd, context_size, english_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.block = Sequential_Encoder(*[EncoderLayer(model_embd, ffn_hidden, num_heads, drop_prob, vocab_size) for _ in range(num_layers)])
         
     def forward(self, idx, self_attention_mask, start_token, end_token):
         x = self.sentence_embedding(idx, start_token, end_token)
         x = self.block(x, self_attention_mask)
         return x
 
+class Sequential_Decoder(nn.Sequential):
+    def forward(self, *inputs):
+        x, y, self_attention_mask, cross_attention_mask = inputs
+        for module in self._modules.values():
+            y = module(x, y, self_attention_mask, cross_attention_mask)
+        return y
+    
+class DecoderLayer(nn.Module):
+    def __init__(self, model_embd, ffn_hidden, num_heads, drop_prob, vocab_size):
+        super(DecoderLayer, self).__init__()
+        self.self_attention = MultiHeadAttention(model_embd=model_embd, num_heads=num_heads)
+        self.layer_norm1 = LayerNormalization(parameters_shape=[model_embd])
+        self.linear1 = nn.Linear(model_embd, vocab_size)
+        self.dropout1 = nn.Dropout(p=drop_prob)
+
+        self.encoder_decoder_attention = MultiHeadCrossAttention(model_embd=model_embd, num_heads=num_heads)
+        self.layer_norm2 = LayerNormalization(parameters_shape=[model_embd])
+        self.linear2 = nn.Linear(model_embd, vocab_size)
+        self.dropout2 = nn.Dropout(p=drop_prob)
+
+        self.ffn = PositionwiseFeedForward(model_embd=model_embd, hidden=ffn_hidden, drop_prob=drop_prob)
+        self.layer_norm3 = LayerNormalization(parameters_shape=[model_embd])
+        self.linear3 = nn.Linear(model_embd, vocab_size)
+        self.dropout3 = nn.Dropout(p=drop_prob)
+
+    def forward(self, x, y, self_attention_mask, cross_attention_mask):
+        residual_y = y.clone()
+        y = self.self_attention(y, mask=self_attention_mask)
+        y = self.dropout1(y)
+        y = self.layer_norm1(y + residual_y)
+        y = self.linear1(y)
+
+        _residual_y = y.clone()
+        y = self.encoder_decoder_attention(x, y, mask=cross_attention_mask)
+        y = self.dropout2(y)
+        y = self.layer_norm2(y + residual_y)
+        y = self.linear2(y)
+
+        residual_y = y.clone()
+        y = self.ffn(y)
+        y = self.dropout3(y)
+        y = self.layer_norm3(y + residual_y)
+        y = self.linear3(y)
+        return y
+     
 class Decoder(nn.module):
     def __init__(
         self,
@@ -84,13 +165,15 @@ class Decoder(nn.module):
         num_layers, 
         max_seq_length, 
         batch_size, 
-        context_size, 
+        context_size,
+        vocab_size,
+        portugese_to_index, 
         START_TOKEN, 
         END_TOKEN, 
         PADDING_TOKEN):
         super().__init__()
-        self.sentence_embedding = Sentence_Embedding(max_seq_length, model_embd, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.block = Sequential_Decoder(*[DecoderLayer(model_embd, ffn_hidden, num_heads, drop_prob) for _ in range(num_layers)])
+        self.sentence_embedding = Sentence_Embedding(max_seq_length, model_embd, context_size, portugese_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.block = Sequential_Decoder(*[DecoderLayer(model_embd, ffn_hidden, num_heads, drop_prob, vocab_size) for _ in range(num_layers)])
         
     def forward(self, x, idy, self_attention_mask, cross_attention_mask, start_token, end_token):
         y = self.sentence_embedding(idy, start_token, end_token)
@@ -120,8 +203,8 @@ class Transformer(nn.module):
             ):
         super().__init__()
         self.device = get_device()
-        self.encoder = Encoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, english_to_index, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.decoder = Decoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, portugese_to_index, batch_size, context_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.encoder = Encoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, english_to_index, batch_size, context_size, vocab_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.decoder = Decoder(model_embd, ffn_hidden, num_heads, drop_prob, num_layers, max_seq_length, portugese_to_index, batch_size, context_size, vocab_size, START_TOKEN, END_TOKEN, PADDING_TOKEN)
         self.layerNorm = nn.LayerNorm(model_embd)
         self.linear = nn.linear(model_embd, vocab_size)
 
