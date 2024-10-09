@@ -95,6 +95,48 @@ class MultiHeadAttention(nn.Module):
         out = torch.cat([h(x,mask) for h in self.heads], dim=-1)
         out = self.dropout(self.proj(out))
         return out
+
+class SingleHeadCrossAttention(nn.Module):
+    def __init__(self, model_embd, head_dim):
+        super().__init__()
+        self.model_embd = model_embd
+        self.head_dim = head_dim
+        self.key = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.query = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.value = nn.Linear(model_embd, self.head_dim, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(context_size, context_size)))
+        self.linear_layer = nn.Linear(model_embd, model_embd)
+    
+    def forward(self, x, y, mask=None):
+        B,T,C = x.shape
+        k = self.key(x)   # (B,T,C)
+        q = self.query(y) # (B,T,C)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        if mask is not None:
+            wei = wei + mask
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        # perform the weighted aggregation of the values
+        v = self.value(x) # (B,T,C)
+        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        return out
+
+class MultiHeadCrossAttention(nn.Module):
+    def __init__(self, model_embd, num_heads, drop_prob):
+        super().__init__()
+        self.drop_prob = drop_prob
+        self.model_embd = model_embd
+        self.num_heads = num_heads
+        self.head_size = model_embd // num_heads
+        self.heads = nn.ModuleList([SingleHeadCrossAttention(model_embd, self.head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(model_embd, model_embd)
+        self.dropout = nn.Dropout(drop_prob)
+
+    def forward(self, x, y, mask=None):
+        out = torch.cat([h(x,y,mask) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
     
 class LayerNormalization(nn.module):
     def __init__(self, parameters_shape, eps=1e-5):
